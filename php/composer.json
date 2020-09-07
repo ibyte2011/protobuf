@@ -9,19 +9,21 @@
     "php": ">=5.5.0"
   },
   "require-dev": {
-    "phpunit/phpunit": ">=4.8.0"
+    "phpunit/phpunit": "^5|^4.8.0"
   },
   "autoload": {
     "psr-4": {
-      "Foo\\": "tests/generated/Foo",
-      "Bar\\": "tests/generated/Bar",
-      "Google\\Protobuf\\": "tests/generated/Google/Protobuf",
-      "Google\\Protobuf\\Internal\\": "src/Google/Protobuf/Internal",
-      "GPBMetadata\\": "tests/generated/GPBMetadata",
-      "GPBMetadata\\Google\\Protobuf\\Internal\\": "src/GPBMetadata/Google/Protobuf/Internal"
-    },
-    "files": [
-      "src/Google/Protobuf/descriptor.php"
-    ]
+      "Google\\Protobuf\\": "src/Google/Protobuf",
+      "GPBMetadata\\Google\\Protobuf\\": "src/GPBMetadata/Google/Protobuf"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "": "tests/generated"
+    }
+  },
+  "scripts": {
+    "test": "tests/generate_protos.sh && vendor/bin/phpunit",
+    "aggregate_metadata_test": "tests/generate_protos.sh --aggregate_metadata && vendor/bin/phpunit"
   }
 }

@@ -71,6 +71,9 @@ static VALUE table_key(Map* self, VALUE key,
     case UPB_TYPE_BYTES:
     case UPB_TYPE_STRING:
       // Strings: use string content directly.
+      if (TYPE(key) == T_SYMBOL) {
+        key = rb_id2str(SYM2ID(key));
+      }
       Check_Type(key, T_STRING);
       key = native_slot_encode_and_freeze_string(self->key_type, key);
       *out_key = RSTRING_PTR(key);
@@ -82,7 +85,7 @@ static VALUE table_key(Map* self, VALUE key,
     case UPB_TYPE_INT64:
     case UPB_TYPE_UINT32:
     case UPB_TYPE_UINT64:
-      native_slot_set(self->key_type, Qnil, buf, key);
+      native_slot_set("", self->key_type, Qnil, buf, key);
       *out_key = buf;
       *out_length = native_slot_size(self->key_type);
       break;
@@ -97,11 +100,11 @@ static VALUE table_key(Map* self, VALUE key,
   return key;
 }
 
-static VALUE table_key_to_ruby(Map* self, const char* buf, size_t length) {
+static VALUE table_key_to_ruby(Map* self, upb_strview key) {
   switch (self->key_type) {
     case UPB_TYPE_BYTES:
     case UPB_TYPE_STRING: {
-      VALUE ret = rb_str_new(buf, length);
+      VALUE ret = rb_str_new(key.data, key.size);
       rb_enc_associate(ret,
                        (self->key_type == UPB_TYPE_BYTES) ?
                        kRubyString8bitEncoding : kRubyStringUtf8Encoding);
@@ -113,7 +116,7 @@ static VALUE table_key_to_ruby(Map* self, const char* buf, size_t length) {
     case UPB_TYPE_INT64:
     case UPB_TYPE_UINT32:
     case UPB_TYPE_UINT64:
-      return native_slot_get(self->key_type, Qnil, buf);
+      return native_slot_get(self->key_type, Qnil, key.data);
 
     default:
       assert(false);
@@ -146,6 +149,7 @@ void Map_mark(void* _self) {
   Map* self = _self;
 
   rb_gc_mark(self->value_type_class);
+  rb_gc_mark(self->parse_frame);
 
   if (self->value_type == UPB_TYPE_STRING ||
       self->value_type == UPB_TYPE_BYTES ||
@@ -172,6 +176,12 @@ VALUE Map_alloc(VALUE klass) {
   memset(self, 0, sizeof(Map));
   self->value_type_class = Qnil;
   return TypedData_Wrap_Struct(klass, &Map_type, self);
+}
+
+VALUE Map_set_frame(VALUE map, VALUE val) {
+  Map* self = ruby_to_Map(map);
+  self->parse_frame = val;
+  return val;
 }
 
 static bool needs_typeclass(upb_fieldtype_t type) {
@@ -227,6 +237,7 @@ VALUE Map_init(int argc, VALUE* argv, VALUE _self) {
 
   self->key_type = ruby_to_fieldtype(argv[0]);
   self->value_type = ruby_to_fieldtype(argv[1]);
+  self->parse_frame = Qnil;
 
   // Check that the key type is an allowed type.
   switch (self->key_type) {
@@ -278,9 +289,7 @@ VALUE Map_each(VALUE _self) {
   for (upb_strtable_begin(&it, &self->table);
        !upb_strtable_done(&it);
        upb_strtable_next(&it)) {
-
-    VALUE key = table_key_to_ruby(
-        self, upb_strtable_iter_key(&it), upb_strtable_iter_keylength(&it));
+    VALUE key = table_key_to_ruby(self, upb_strtable_iter_key(&it));
 
     upb_value v = upb_strtable_iter_value(&it);
     void* mem = value_memory(&v);
@@ -308,9 +317,7 @@ VALUE Map_keys(VALUE _self) {
   for (upb_strtable_begin(&it, &self->table);
        !upb_strtable_done(&it);
        upb_strtable_next(&it)) {
-
-    VALUE key = table_key_to_ruby(
-        self, upb_strtable_iter_key(&it), upb_strtable_iter_keylength(&it));
+    VALUE key = table_key_to_ruby(self, upb_strtable_iter_key(&it));
 
     rb_ary_push(ret, key);
   }
@@ -379,7 +386,6 @@ VALUE Map_index(VALUE _self, VALUE key) {
  */
 VALUE Map_index_set(VALUE _self, VALUE key, VALUE value) {
   Map* self = ruby_to_Map(_self);
-
   char keybuf[TABLE_KEY_BUF_LENGTH];
   const char* keyval = NULL;
   size_t length = 0;
@@ -387,8 +393,15 @@ VALUE Map_index_set(VALUE _self, VALUE key, VALUE value) {
   void* mem;
   key = table_key(self, key, keybuf, &keyval, &length);
 
+  rb_check_frozen(_self);
+
+  if (TYPE(value) == T_HASH) {
+    VALUE args[1] = { value };
+    value = rb_class_new_instance(1, args, self->value_type_class);
+  }
+
   mem = value_memory(&v);
-  native_slot_set(self->value_type, self->value_type_class, mem, value);
+  native_slot_set("", self->value_type, self->value_type_class, mem, value);
 
   // Replace any existing value by issuing a 'remove' operation first.
   upb_strtable_remove2(&self->table, keyval, length, NULL);
@@ -431,12 +444,13 @@ VALUE Map_has_key(VALUE _self, VALUE key) {
  */
 VALUE Map_delete(VALUE _self, VALUE key) {
   Map* self = ruby_to_Map(_self);
-
   char keybuf[TABLE_KEY_BUF_LENGTH];
   const char* keyval = NULL;
   size_t length = 0;
   upb_value v;
   key = table_key(self, key, keybuf, &keyval, &length);
+
+  rb_check_frozen(_self);
 
   if (upb_strtable_remove2(&self->table, keyval, length, &v)) {
     void* mem = value_memory(&v);
@@ -454,6 +468,8 @@ VALUE Map_delete(VALUE _self, VALUE key) {
  */
 VALUE Map_clear(VALUE _self) {
   Map* self = ruby_to_Map(_self);
+
+  rb_check_frozen(_self);
 
   // Uninit and reinit the table -- this is faster than iterating and doing a
   // delete-lookup on each key.
@@ -475,7 +491,7 @@ VALUE Map_length(VALUE _self) {
   return ULL2NUM(upb_strtable_count(&self->table));
 }
 
-static VALUE Map_new_this_type(VALUE _self) {
+VALUE Map_new_this_type(VALUE _self) {
   Map* self = ruby_to_Map(_self);
   VALUE new_map = Qnil;
   VALUE key_type = fieldtype_to_ruby(self->key_type);
@@ -506,17 +522,14 @@ VALUE Map_dup(VALUE _self) {
   for (upb_strtable_begin(&it, &self->table);
        !upb_strtable_done(&it);
        upb_strtable_next(&it)) {
-
+    upb_strview k = upb_strtable_iter_key(&it);
     upb_value v = upb_strtable_iter_value(&it);
     void* mem = value_memory(&v);
     upb_value dup;
     void* dup_mem = value_memory(&dup);
     native_slot_dup(self->value_type, dup_mem, mem);
 
-    if (!upb_strtable_insert2(&new_self->table,
-                              upb_strtable_iter_key(&it),
-                              upb_strtable_iter_keylength(&it),
-                              dup)) {
+    if (!upb_strtable_insert2(&new_self->table, k.data, k.size, dup)) {
       rb_raise(rb_eRuntimeError, "Error inserting value into new table");
     }
   }
@@ -534,17 +547,15 @@ VALUE Map_deep_copy(VALUE _self) {
   for (upb_strtable_begin(&it, &self->table);
        !upb_strtable_done(&it);
        upb_strtable_next(&it)) {
-
+    upb_strview k = upb_strtable_iter_key(&it);
     upb_value v = upb_strtable_iter_value(&it);
     void* mem = value_memory(&v);
     upb_value dup;
     void* dup_mem = value_memory(&dup);
-    native_slot_deep_copy(self->value_type, dup_mem, mem);
+    native_slot_deep_copy(self->value_type, self->value_type_class, dup_mem,
+                          mem);
 
-    if (!upb_strtable_insert2(&new_self->table,
-                              upb_strtable_iter_key(&it),
-                              upb_strtable_iter_keylength(&it),
-                              dup)) {
+    if (!upb_strtable_insert2(&new_self->table, k.data, k.size, dup)) {
       rb_raise(rb_eRuntimeError, "Error inserting value into new table");
     }
   }
@@ -597,21 +608,19 @@ VALUE Map_eq(VALUE _self, VALUE _other) {
   for (upb_strtable_begin(&it, &self->table);
        !upb_strtable_done(&it);
        upb_strtable_next(&it)) {
-
+    upb_strview k = upb_strtable_iter_key(&it);
     upb_value v = upb_strtable_iter_value(&it);
     void* mem = value_memory(&v);
     upb_value other_v;
     void* other_mem = value_memory(&other_v);
 
-    if (!upb_strtable_lookup2(&other->table,
-                              upb_strtable_iter_key(&it),
-                              upb_strtable_iter_keylength(&it),
-                              &other_v)) {
+    if (!upb_strtable_lookup2(&other->table, k.data, k.size, &other_v)) {
       // Not present in other map.
       return Qfalse;
     }
 
-    if (!native_slot_eq(self->value_type, mem, other_mem)) {
+    if (!native_slot_eq(self->value_type, self->value_type_class, mem,
+                        other_mem)) {
       // Present, but value not equal.
       return Qfalse;
     }
@@ -633,11 +642,9 @@ VALUE Map_hash(VALUE _self) {
   VALUE hash_sym = rb_intern("hash");
 
   upb_strtable_iter it;
-  for (upb_strtable_begin(&it, &self->table);
-       !upb_strtable_done(&it);
+  for (upb_strtable_begin(&it, &self->table); !upb_strtable_done(&it);
        upb_strtable_next(&it)) {
-    VALUE key = table_key_to_ruby(
-        self, upb_strtable_iter_key(&it), upb_strtable_iter_keylength(&it));
+    VALUE key = table_key_to_ruby(self, upb_strtable_iter_key(&it));
 
     upb_value v = upb_strtable_iter_value(&it);
     void* mem = value_memory(&v);
@@ -650,6 +657,34 @@ VALUE Map_hash(VALUE _self) {
   }
 
   return INT2FIX(h);
+}
+
+/*
+ * call-seq:
+ *     Map.to_h => {}
+ *
+ * Returns a Ruby Hash object containing all the values within the map
+ */
+VALUE Map_to_h(VALUE _self) {
+  Map* self = ruby_to_Map(_self);
+  VALUE hash = rb_hash_new();
+  upb_strtable_iter it;
+  for (upb_strtable_begin(&it, &self->table);
+       !upb_strtable_done(&it);
+       upb_strtable_next(&it)) {
+    VALUE key = table_key_to_ruby(self, upb_strtable_iter_key(&it));
+    upb_value v = upb_strtable_iter_value(&it);
+    void* mem = value_memory(&v);
+    VALUE value = native_slot_get(self->value_type,
+                                  self->value_type_class,
+                                  mem);
+
+    if (self->value_type == UPB_TYPE_MESSAGE) {
+      value = Message_to_h(value);
+    }
+    rb_hash_aset(hash, key, value);
+  }
+  return hash;
 }
 
 /*
@@ -669,11 +704,9 @@ VALUE Map_inspect(VALUE _self) {
   VALUE inspect_sym = rb_intern("inspect");
 
   upb_strtable_iter it;
-  for (upb_strtable_begin(&it, &self->table);
-       !upb_strtable_done(&it);
+  for (upb_strtable_begin(&it, &self->table); !upb_strtable_done(&it);
        upb_strtable_next(&it)) {
-    VALUE key = table_key_to_ruby(
-        self, upb_strtable_iter_key(&it), upb_strtable_iter_keylength(&it));
+    VALUE key = table_key_to_ruby(self, upb_strtable_iter_key(&it));
 
     upb_value v = upb_strtable_iter_value(&it);
     void* mem = value_memory(&v);
@@ -734,20 +767,15 @@ VALUE Map_merge_into_self(VALUE _self, VALUE hashmap) {
     for (upb_strtable_begin(&it, &other->table);
          !upb_strtable_done(&it);
          upb_strtable_next(&it)) {
+      upb_strview k = upb_strtable_iter_key(&it);
 
       // Replace any existing value by issuing a 'remove' operation first.
       upb_value v;
       upb_value oldv;
-      upb_strtable_remove2(&self->table,
-                           upb_strtable_iter_key(&it),
-                           upb_strtable_iter_keylength(&it),
-                           &oldv);
+      upb_strtable_remove2(&self->table, k.data, k.size, &oldv);
 
       v = upb_strtable_iter_value(&it);
-      upb_strtable_insert2(&self->table,
-                           upb_strtable_iter_key(&it),
-                           upb_strtable_iter_keylength(&it),
-                           v);
+      upb_strtable_insert2(&self->table, k.data, k.size, v);
     }
   } else {
     rb_raise(rb_eArgError, "Unknown type merging into Map");
@@ -771,10 +799,7 @@ bool Map_done(Map_iter* iter) {
 }
 
 VALUE Map_iter_key(Map_iter* iter) {
-  return table_key_to_ruby(
-      iter->self,
-      upb_strtable_iter_key(&iter->it),
-      upb_strtable_iter_keylength(&iter->it));
+  return table_key_to_ruby(iter->self, upb_strtable_iter_key(&iter->it));
 }
 
 VALUE Map_iter_value(Map_iter* iter) {
@@ -788,8 +813,8 @@ VALUE Map_iter_value(Map_iter* iter) {
 void Map_register(VALUE module) {
   VALUE klass = rb_define_class_under(module, "Map", rb_cObject);
   rb_define_alloc_func(klass, Map_alloc);
-  cMap = klass;
   rb_gc_register_address(&cMap);
+  cMap = klass;
 
   rb_define_method(klass, "initialize", Map_init, -1);
   rb_define_method(klass, "each", Map_each, 0);
@@ -804,6 +829,7 @@ void Map_register(VALUE module) {
   rb_define_method(klass, "dup", Map_dup, 0);
   rb_define_method(klass, "==", Map_eq, 1);
   rb_define_method(klass, "hash", Map_hash, 0);
+  rb_define_method(klass, "to_h", Map_to_h, 0);
   rb_define_method(klass, "inspect", Map_inspect, 0);
   rb_define_method(klass, "merge", Map_merge, 1);
   rb_include_module(klass, rb_mEnumerable);

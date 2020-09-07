@@ -1,4 +1,4 @@
-;;; protobuf-mode.el --- major mode for editing protocol buffers.
+;;; protobuf-mode.el --- major mode for editing protocol buffers.  -*- lexical-binding: t; -*-
 
 ;; Author: Alexandre Vassalotti <alexandre@peadrop.com>
 ;; Created: 23-Apr-2009
@@ -64,9 +64,11 @@
 ;;; Code:
 
 (require 'cc-mode)
-(require 'cl)
 
 (eval-when-compile
+  (and (= emacs-major-version 24)
+       (>= emacs-minor-version 4)
+       (require 'cl))
   (require 'cc-langs)
   (require 'cc-fonts))
 
@@ -214,7 +216,11 @@ Key bindings:
   (c-common-init 'protobuf-mode)
   (easy-menu-add protobuf-menu)
   (c-run-mode-hooks 'c-mode-common-hook 'protobuf-mode-hook)
-  (c-update-modeline))
+  (c-update-modeline)
+  (setq imenu-generic-expression
+	    '(("Message" "^[[:space:]]*message[[:space:]]+\\([[:alnum:]]+\\)" 1)
+          ("Enum" "^[[:space:]]*enum[[:space:]]+\\([[:alnum:]]+\\)" 1)
+          ("Service" "^[[:space:]]*service[[:space:]]+\\([[:alnum:]]+\\)" 1))))
 
 (provide 'protobuf-mode)
 

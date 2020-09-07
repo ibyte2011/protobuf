@@ -176,7 +176,7 @@ function fillAllFields(msg) {
  * @return {boolean}
  */
 function bytesCompare(arr, expected) {
-  if (goog.isString(arr)) {
+  if (typeof arr === 'string') {
     arr = goog.crypt.base64.decodeStringToUint8Array(arr);
   }
   if (arr.length != expected.length) {
@@ -283,8 +283,7 @@ function checkAllFields(original, copy) {
  * @param {!proto.jspb.test.TestExtendable} msg
  */
 function checkExtensions(msg) {
-  assertEquals(-42,
-      msg.getExtension(proto.jspb.test.extendOptionalInt32));
+  assertEquals(0, msg.getExtension(proto.jspb.test.extendOptionalInt32));
   assertEquals(-0x7fffffff00000000,
       msg.getExtension(proto.jspb.test.extendOptionalInt64));
   assertEquals(0x80000000,
@@ -482,8 +481,8 @@ describe('protoBinaryTest', function() {
     var msg = new proto.jspb.test.TestAllTypes();
 
     function assertGetters() {
-      assertTrue(goog.isString(msg.getRepeatedBytesList_asB64()[0]));
-      assertTrue(goog.isString(msg.getRepeatedBytesList_asB64()[1]));
+      assertTrue(typeof msg.getRepeatedBytesList_asB64()[0] === 'string');
+      assertTrue(typeof msg.getRepeatedBytesList_asB64()[1] === 'string');
       assertTrue(msg.getRepeatedBytesList_asU8()[0] instanceof Uint8Array);
       assertTrue(msg.getRepeatedBytesList_asU8()[1] instanceof Uint8Array);
 
@@ -512,8 +511,7 @@ describe('protoBinaryTest', function() {
    * @param {proto.jspb.test.TestExtendable} msg
    */
   function fillExtensions(msg) {
-    msg.setExtension(
-        proto.jspb.test.extendOptionalInt32, -42);
+    msg.setExtension(proto.jspb.test.extendOptionalInt32, 0);
     msg.setExtension(
         proto.jspb.test.extendOptionalInt64, -0x7fffffff00000000);
     msg.setExtension(
@@ -661,5 +659,7 @@ describe('protoBinaryTest', function() {
         'jspb.test.TestAllTypes');
 
     checkAllFields(msg, msg2);
+
   });
+
 });

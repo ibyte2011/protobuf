@@ -34,7 +34,7 @@ using System;
 using System.Text;
 using NUnit.Framework;
 using System.IO;
-#if !DOTNET35
+#if !NET35
 using System.Threading.Tasks;
 #endif
 
@@ -196,7 +196,7 @@ namespace Google.Protobuf
             Assert.AreEqual(expected, actual, $"{expected.ToBase64()} != {actual.ToBase64()}");
         }
 
-#if !DOTNET35
+#if !NET35
         [Test]
         public async Task FromStreamAsync_Seekable()
         {
@@ -227,11 +227,27 @@ namespace Google.Protobuf
         {
             // We used to have an awful hash algorithm where only the last four
             // bytes were relevant. This is a regression test for
-            // https://github.com/google/protobuf/issues/2511
+            // https://github.com/protocolbuffers/protobuf/issues/2511
 
             ByteString b1 = ByteString.CopyFrom(100, 1, 2, 3, 4);
             ByteString b2 = ByteString.CopyFrom(200, 1, 2, 3, 4);
             Assert.AreNotEqual(b1.GetHashCode(), b2.GetHashCode());
+        }
+
+        [Test]
+        public void GetContentsAsReadOnlySpan()
+        {
+            var byteString = ByteString.CopyFrom(1, 2, 3, 4, 5);
+            var copied = byteString.Span.ToArray();
+            CollectionAssert.AreEqual(byteString, copied);
+        }
+
+        [Test]
+        public void GetContentsAsReadOnlyMemory()
+        {
+            var byteString = ByteString.CopyFrom(1, 2, 3, 4, 5);
+            var copied = byteString.Memory.ToArray();
+            CollectionAssert.AreEqual(byteString, copied);
         }
     }
 }

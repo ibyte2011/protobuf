@@ -33,10 +33,12 @@
 using Google.Protobuf.Compatibility;
 using Google.Protobuf.Reflection;
 using System;
+using System.Buffers;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security;
 
 namespace Google.Protobuf.Collections
 {
@@ -67,10 +69,16 @@ namespace Google.Protobuf.Collections
     /// </para>
     /// </remarks>
     public sealed class MapField<TKey, TValue> : IDeepCloneable<MapField<TKey, TValue>>, IDictionary<TKey, TValue>, IEquatable<MapField<TKey, TValue>>, IDictionary
+#if !NET35
+        , IReadOnlyDictionary<TKey, TValue>
+#endif
     {
+        private static readonly EqualityComparer<TValue> ValueEqualityComparer = ProtobufEqualityComparers.GetEqualityComparer<TValue>();
+        private static readonly EqualityComparer<TKey> KeyEqualityComparer = ProtobufEqualityComparers.GetEqualityComparer<TKey>();
+
         // TODO: Don't create the map/list until we have an entry. (Assume many maps will be empty.)
         private readonly Dictionary<TKey, LinkedListNode<KeyValuePair<TKey, TValue>>> map =
-            new Dictionary<TKey, LinkedListNode<KeyValuePair<TKey, TValue>>>();
+            new Dictionary<TKey, LinkedListNode<KeyValuePair<TKey, TValue>>>(KeyEqualityComparer);
         private readonly LinkedList<KeyValuePair<TKey, TValue>> list = new LinkedList<KeyValuePair<TKey, TValue>>();
 
         /// <summary>
@@ -128,11 +136,8 @@ namespace Google.Protobuf.Collections
             return map.ContainsKey(key);
         }
 
-        private bool ContainsValue(TValue value)
-        {
-            var comparer = EqualityComparer<TValue>.Default;
-            return list.Any(pair => comparer.Equals(pair.Value, value));
-        }
+        private bool ContainsValue(TValue value) =>
+            list.Any(pair => ValueEqualityComparer.Equals(pair.Value, value));
 
         /// <summary>
         /// Removes the entry identified by the given key from the map.
@@ -290,8 +295,7 @@ namespace Google.Protobuf.Collections
         bool ICollection<KeyValuePair<TKey, TValue>>.Contains(KeyValuePair<TKey, TValue> item)
         {
             TValue value;
-            return TryGetValue(item.Key, out value)
-                && EqualityComparer<TValue>.Default.Equals(item.Value, value);
+            return TryGetValue(item.Key, out value) && ValueEqualityComparer.Equals(item.Value, value);
         }
 
         /// <summary>
@@ -360,11 +364,12 @@ namespace Google.Protobuf.Collections
         /// </returns>
         public override int GetHashCode()
         {
-            var valueComparer = EqualityComparer<TValue>.Default;
+            var keyComparer = KeyEqualityComparer;
+            var valueComparer = ValueEqualityComparer;
             int hash = 0;
             foreach (var pair in list)
             {
-                hash ^= pair.Key.GetHashCode() * 31 + valueComparer.GetHashCode(pair.Value);
+                hash ^= keyComparer.GetHashCode(pair.Key) * 31 + valueComparer.GetHashCode(pair.Value);
             }
             return hash;
         }
@@ -391,7 +396,7 @@ namespace Google.Protobuf.Collections
             {
                 return false;
             }
-            var valueComparer = EqualityComparer<TValue>.Default;
+            var valueComparer = ValueEqualityComparer;
             foreach (var pair in this)
             {
                 TValue value;
@@ -419,13 +424,37 @@ namespace Google.Protobuf.Collections
         /// <param name="codec">Codec describing how the key/value pairs are encoded</param>
         public void AddEntriesFrom(CodedInputStream input, Codec codec)
         {
+            ParseContext.Initialize(input, out ParseContext ctx);
+            try
+            {
+                AddEntriesFrom(ref ctx, codec);
+            }
+            finally
+            {
+                ctx.CopyStateTo(input);
+            }
+        }
+
+        /// <summary>
+        /// Adds entries to the map from the given parse context.
+        /// </summary>
+        /// <remarks>
+        /// It is assumed that the input is initially positioned after the tag specified by the codec.
+        /// This method will continue reading entries from the input until the end is reached, or
+        /// a different tag is encountered.
+        /// </remarks>
+        /// <param name="ctx">Input to read from</param>
+        /// <param name="codec">Codec describing how the key/value pairs are encoded</param>
+        [SecuritySafeCritical]
+        public void AddEntriesFrom(ref ParseContext ctx, Codec codec)
+        {
             var adapter = new Codec.MessageAdapter(codec);
             do
             {
                 adapter.Reset();
-                input.ReadMessage(adapter);
+                ctx.ReadMessage(adapter);
                 this[adapter.Key] = adapter.Value;
-            } while (input.MaybeConsumeTag(codec.MapTag));
+            } while (ParsingPrimitives.MaybeConsumeTag(ref ctx.buffer, ref ctx.state, codec.MapTag));
         }
 
         /// <summary>
@@ -436,13 +465,33 @@ namespace Google.Protobuf.Collections
         /// <param name="codec">The codec to use for each entry.</param>
         public void WriteTo(CodedOutputStream output, Codec codec)
         {
+            WriteContext.Initialize(output, out WriteContext ctx);
+            try
+            {
+                WriteTo(ref ctx, codec);
+            }
+            finally
+            {
+                ctx.CopyStateTo(output);
+            }
+        }
+
+        /// <summary>
+        /// Writes the contents of this map to the given write context, using the specified codec
+        /// to encode each entry.
+        /// </summary>
+        /// <param name="ctx">The write context to write to.</param>
+        /// <param name="codec">The codec to use for each entry.</param>
+        [SecuritySafeCritical]
+        public void WriteTo(ref WriteContext ctx, Codec codec)
+        {
             var message = new Codec.MessageAdapter(codec);
             foreach (var entry in list)
             {
                 message.Key = entry.Key;
                 message.Value = entry.Value;
-                output.WriteTag(codec.MapTag);
-                output.WriteMessage(message);
+                ctx.WriteTag(codec.MapTag);
+                ctx.WriteMessage(message);
             }
         }
 
@@ -548,6 +597,14 @@ namespace Google.Protobuf.Collections
         }
         #endregion
 
+        #region IReadOnlyDictionary explicit interface implementation
+#if !NET35
+        IEnumerable<TKey> IReadOnlyDictionary<TKey, TValue>.Keys => Keys;
+
+        IEnumerable<TValue> IReadOnlyDictionary<TKey, TValue>.Values => Values;
+#endif
+        #endregion
+
         private class DictionaryEnumerator : IDictionaryEnumerator
         {
             private readonly IEnumerator<KeyValuePair<TKey, TValue>> enumerator;
@@ -609,7 +666,7 @@ namespace Google.Protobuf.Collections
             /// This is nested inside Codec as it's tightly coupled to the associated codec,
             /// and it's simpler if it has direct access to all its fields.
             /// </summary>
-            internal class MessageAdapter : IMessage
+            internal class MessageAdapter : IMessage, IBufferMessage
             {
                 private static readonly byte[] ZeroLengthMessageStreamData = new byte[] { 0 };
 
@@ -630,35 +687,59 @@ namespace Google.Protobuf.Collections
 
                 public void MergeFrom(CodedInputStream input)
                 {
+                    // Message adapter is an internal class and we know that all the parsing will happen via InternalMergeFrom.
+                    throw new NotImplementedException();
+                }
+
+                [SecuritySafeCritical]
+                public void InternalMergeFrom(ref ParseContext ctx)
+                {
                     uint tag;
-                    while ((tag = input.ReadTag()) != 0)
+                    while ((tag = ctx.ReadTag()) != 0)
                     {
                         if (tag == codec.keyCodec.Tag)
                         {
-                            Key = codec.keyCodec.Read(input);
+                            Key = codec.keyCodec.Read(ref ctx);
                         }
                         else if (tag == codec.valueCodec.Tag)
                         {
-                            Value = codec.valueCodec.Read(input);
+                            Value = codec.valueCodec.Read(ref ctx);
                         }
                         else 
                         {
-                            input.SkipLastField();
+                            ParsingPrimitivesMessages.SkipLastField(ref ctx.buffer, ref ctx.state);
                         }
                     }
 
                     // Corner case: a map entry with a key but no value, where the value type is a message.
-                    // Read it as if we'd seen an input stream with no data (i.e. create a "default" message).
+                    // Read it as if we'd seen input with no data (i.e. create a "default" message).
                     if (Value == null)
                     {
-                        Value = codec.valueCodec.Read(new CodedInputStream(ZeroLengthMessageStreamData));
+                        if (ctx.state.CodedInputStream != null)
+                        {
+                            // the decoded message might not support parsing from ParseContext, so
+                            // we need to allow fallback to the legacy MergeFrom(CodedInputStream) parsing.
+                            Value = codec.valueCodec.Read(new CodedInputStream(ZeroLengthMessageStreamData));
+                        }
+                        else
+                        {
+                            ParseContext.Initialize(new ReadOnlySequence<byte>(ZeroLengthMessageStreamData), out ParseContext zeroLengthCtx);
+                            Value = codec.valueCodec.Read(ref zeroLengthCtx);
+                        }
                     }
                 }
 
                 public void WriteTo(CodedOutputStream output)
                 {
-                    codec.keyCodec.WriteTagAndValue(output, Key);
-                    codec.valueCodec.WriteTagAndValue(output, Value);
+                    // Message adapter is an internal class and we know that all the writing will happen via InternalWriteTo.
+                    throw new NotImplementedException();
+                }
+
+                [SecuritySafeCritical]
+                public void InternalWriteTo(ref WriteContext ctx)
+                {
+                    codec.keyCodec.WriteTagAndValue(ref ctx, Key);
+                    codec.valueCodec.WriteTagAndValue(ref ctx, Value);
                 }
 
                 public int CalculateSize()
@@ -715,7 +796,7 @@ namespace Google.Protobuf.Collections
                 {
                     throw new ArgumentOutOfRangeException(nameof(arrayIndex));
                 }
-                if (arrayIndex + Count  >= array.Length)
+                if (arrayIndex + Count > array.Length)
                 {
                     throw new ArgumentException("Not enough space in the array", nameof(array));
                 }
@@ -746,7 +827,7 @@ namespace Google.Protobuf.Collections
                 {
                     throw new ArgumentOutOfRangeException(nameof(index));
                 }
-                if (index + Count >= array.Length)
+                if (index + Count > array.Length)
                 {
                     throw new ArgumentException("Not enough space in the array", nameof(array));
                 }
